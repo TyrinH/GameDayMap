@@ -10,19 +10,16 @@ import (
 	"time"
 
 	"github.com/gocolly/colly"
-	"github.com/joho/godotenv"
 )
 
 type GameRelease struct {
 	ID int64
-	title string
-	date time.Time
+	Title string
+	Date time.Time
 	platforms []string
-	hasReleaseDate bool
+	HasReleaseDate bool
+	EstimatedRelease string
 }
-
-var db *sql.DB
-
 
 func scrapeGameData(url string, baseUrl string) ([]GameRelease) {
 	gameslist := []GameRelease{}
@@ -34,16 +31,17 @@ func scrapeGameData(url string, baseUrl string) ([]GameRelease) {
 	newGameRelease := GameRelease{}
 	badTime := time.Time{}
 			name := strings.Split(e.Text, "(")
-			newGameRelease.title = strings.TrimSpace(name[0])
+			newGameRelease.Title = strings.TrimSpace(name[0])
 			platforms := strings.Split(name[1], ")")
 			platformsSlice := strings.Split(platforms[0],",")
-			fmt.Println(platformsSlice)
-			gameDate, _ := getReleaseDate(e.Text)
+			gameDate, estimatedReleaseStr, _ := getReleaseDate(e.Text)
 			if gameDate.Equal(badTime) {
-				fmt.Println("Inside the if comparing time.Time: ")
-				newGameRelease.hasReleaseDate = false
+				newGameRelease.HasReleaseDate = false
+				newGameRelease.EstimatedRelease = estimatedReleaseStr
 			} else {
-				newGameRelease.date = gameDate
+				newGameRelease.HasReleaseDate = true
+				newGameRelease.Date = gameDate
+				newGameRelease.EstimatedRelease = ""
 			}
 			for i := 0; i < len(platformsSlice); i++ {
 				if len(platformsSlice) > 0 {
@@ -66,7 +64,7 @@ func scrapeGameData(url string, baseUrl string) ([]GameRelease) {
 	return gameslist
 }
 
-func getReleaseDate(str string) (time.Time, error) {
+func getReleaseDate(str string) (time.Time, string, error) {
 	parts := strings.Split(str, "—")
 	
 	var dateStr string
@@ -76,36 +74,36 @@ func getReleaseDate(str string) (time.Time, error) {
 		fmt.Println(output)
 		dateStr = strings.TrimSpace(parts[1])
 	} else {
-		return time.Time{}, fmt.Errorf("no time found")
+		return time.Time{}, "", fmt.Errorf("no time found")
 	}
 	dateParts := strings.Split(dateStr, " (") // Replace " - " with the character or string that marks the end of your date
     dateStr = dateParts[0]
 	yearAddedDateStr := fmt.Sprintf("%s, 2024", dateStr)
 	var layout string
-    if strings.Contains(yearAddedDateStr, ".") {
+    if strings.Contains(yearAddedDateStr, ".") && !strings.Contains(yearAddedDateStr, "Sept.") {
         layout = "Jan. 2, 2006"
-    } else if len(dateStr) > 3 && dateStr[3] == ' ' {
-        layout = "Jan 2, 2006"
     } else if strings.Contains(yearAddedDateStr, "Sept.") {
-		layout = "Janua. 2, 2006"
-	} else {
+		date := strings.Split(yearAddedDateStr, ".")
+		yearAddedDateStr = fmt.Sprintf("Sep. %s", date[1])
+		layout = "Jan. 2, 2006"
+	}  else if len(dateStr) > 3 && dateStr[3] == ' ' {
+        layout = "Jan 2, 2006"
+    }else {
         layout = "January 2, 2006"
     }
     date, err := time.Parse(layout, yearAddedDateStr)
+	estimatedReleaseStr := yearAddedDateStr
     if err != nil {
         fmt.Println("Error:", err)
-        return time.Time{}, err
+        return time.Time{}, estimatedReleaseStr, err
     }
     fmt.Println("Date:", date)
-	return date, nil
+	return date, "", nil
 }
 
-func writeGameToDB(game GameRelease) (int64, error) {
+func writeGameToDB(game GameRelease, db *sql.DB) (int64, error) {
 	var id int64
-	// if game.date.Equal(time.Time{}) {
-	// 	err := db.QueryRow(`INSERT INTO games(title, release_date, hasreleasedate) VALUES($1, $2) RETURNING id`, game.title, game.date).Scan(&id)
-	// }
-	err := db.QueryRow(`INSERT INTO games(title, release_date, hasreleasedate) VALUES($1, $2, $3) RETURNING id`, game.title, game.date, game.hasReleaseDate).Scan(&id)
+	err := db.QueryRow(`INSERT INTO games(Title, release_date, hasreleasedate, estimated_released) VALUES($1, $2, $3, $4) RETURNING id`, game.Title, game.Date, game.HasReleaseDate, game.EstimatedRelease).Scan(&id)
 	if err != nil {
         return 0, fmt.Errorf("writeGameToDB: %v", err)
     }
@@ -115,36 +113,18 @@ func writeGameToDB(game GameRelease) (int64, error) {
     return id, nil
 }
 
-func RunDataScrape() {
-	godotenv.Load()
-	DB_NAME := os.Getenv("DB_NAME")
-	DB_USER := os.Getenv("DB_USER")
-	DB_PASSWORD := os.Getenv("DB_PASSWORD")
+func RunDataScrape(db *sql.DB) (int, error) {
 	SCRAPE_URL := os.Getenv("SCRAPE_URL")
 	BASE_URL := os.Getenv("BASE_URL")
-	log.Print()
-	connStr := fmt.Sprintf("user=%s dbname=%s sslmode=disable password=%s", DB_USER, DB_NAME, DB_PASSWORD)
-	var err error
-	db, err = sql.Open("postgres", connStr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	pingErr := db.Ping()
-	if pingErr != nil {
-		log.Fatal(pingErr)
-	}
-	fmt.Println("Connected!")
-
 	gamesToBeAdded := scrapeGameData(SCRAPE_URL, BASE_URL)
-	fmt.Println("New Game found: ", len(gamesToBeAdded))
 
 	for i := 0; i < len(gamesToBeAdded); i++ {
-		gameId, err := writeGameToDB(gamesToBeAdded[i])
+		_, err := writeGameToDB(gamesToBeAdded[i], db)
 		if err != nil {
-			log.Fatal("Failed to save: ", gamesToBeAdded[i].title)
+			log.Fatal("Failed to save: ", gamesToBeAdded[i].Title)
 		}
-		fmt.Println("Successfully added: ", gameId)
 	}
+
+	return len(gamesToBeAdded), nil
 
 }
